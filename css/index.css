@@ -1,0 +1,12 @@
+.image_container {
+    text-align: center;
+}
+
+#content {
+    width: 40%;
+    padding-left:30%;
+}
+
+span {
+    padding-right:20%;
+}

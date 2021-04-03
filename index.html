@@ -1,0 +1,249 @@
+<!doctype html>
+
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+
+  <title>Rendering Sprites with OpenGL</title>
+  <meta name="description" content="How to render sprites">
+  <meta name="author" content="me">
+
+  <link rel="stylesheet" href="css/index.css?v=1.0">
+
+</head>
+
+<body>
+  <div id="content">
+    <h1>Rendering 'pixel perfect' textures to the screen with OpenGL in 2020</h1>
+        <div id="main">
+          <p>Disclaimer: I don't pretend that this is the right way to do things or that this will work for everyone. This solves a specific problem.</p>
+          <h2>The problem</h2>
+          <p>
+            I once met a person on the internet... and he tried to render an image to the screen. The following image:
+          </p>
+          <div class="image_container">
+            <img src="images/What_We_Want.png">
+          </div>
+          <p>
+            To be exact he wanted part of this beautiful piece of art to be displayed. I outlined the part of the image with a doted red-white line:
+          </p>
+          <div class="image_container">
+            <img src="images/What_We_Want_Selected.png">
+          </div>
+          <p>
+            And here is the result he got:
+          </p>
+          <div class="image_container">
+            <img src="images/The_Problem.png">
+          </div>
+          <p>
+            Clearly pixels in the texture did not match up with screen pixels. Something with the sampling was horribly wrong.
+          </p>
+          <h2>Finding the cause of the problem</h2>
+          <p>
+            To find the cause of the problem let's look at some of his code.
+            <pre>
+              self.shader_program.enable();
+              context.bind_vao(&self.vao);
+
+              unsafe {
+                glViewport(
+                  viewport.position.x,
+                  viewport.position.y,
+                  viewport.size.width,
+                  viewport.size.height,
+                );
+              }
+            </pre>
+            <p>First some vertexarry gets bound at the attribute we will look later and the OpenGL viewport gets set to some values. So let's first check out what those values are. Turns out viewport get's set to:</p>
+            <pre>
+              [....]
+              .with_size(Size::new(601, 333))
+              [....]
+              let viewport = Viewport::new(Position::zero(), context.window_size());
+            </pre>
+            <p>So we are going to call glViewport(0, 0, 601, 333);. And cleary one quad get's rendered. Let's figure out where the quad is rendered:</p>
+
+            <pre>
+              let texture = Texture::<f32>::from_disk("src/horrible.png")?;
+              texture.wrap_x(Wrap::NoWrap);
+              texture.wrap_y(Wrap::NoWrap);
+              let sprite = {
+                let mut s = Sprite::<f32>::new(texture.size());
+                s.size = Size::new(16.0, 12.0);
+                s.texture_offset= Position::new(0.0, 0.0);
+                s
+              };
+              [....]
+              pub(crate) fn uv_coords(&self) -> [Vector2<f32>; 4] {
+                let size = self.size.cast::<f32>();
+                let pixel_offset: Vector2<f32> = Vector2::new(0.5 / size.width, 0.5 / size.height);
+                [
+                  Vector2::new(0.0 + pixel_offset.x, 0.0 - pixel_offset.y),
+                  Vector2::new(0.0 + pixel_offset.x, 1.0 - pixel_offset.y),
+                  Vector2::new(1.0 + pixel_offset.x, 0.0 - pixel_offset.y),
+                  Vector2::new(1.0 + pixel_offset.x, 1.0 - pixel_offset.y),
+                ]
+              }
+            </pre>
+            <p>Don't worry if 'pub(crate)' and other things don't make sense to you, they don't make sense to me either. This is a rust-lang thing.
+            The important things are the size of the sprite on the screen is supposed to be 16.0 by 12.0 pixels and the uv coordinates go from (0.0, 0.0) to (1.0, 1.) with some offset.
+            That offset makes no sense to me let's remove that.
+            </p>
+            <pre>
+              pub(crate) fn uv_coords(&self) -> [Vector2<f32>; 4] {
+                [
+                  Vector2::new(0.0, 0.0),
+                  Vector2::new(0.0, 1.0),
+                  Vector2::new(1.0, 0.0),
+                  Vector2::new(1.0, 1.0),
+                ]
+              }
+            </pre>
+            <p> And it works!!</p>
+            <div class="image_container">
+              <img src="images/It_Almost_Works.png">
+            </div>
+            <p>But not really.. This shouldn't work right? I'll explain later so let's dig in some more.</p>
+            <p>Turns out all values get scaled by a pixel_size.</p>
+            <pre>
+              renderer.pixel_size *= 8.0;
+            </pre>
+            <p>Let's try a pixel size of 1.0</p>
+            <div class="image_container">
+              <img src="images/Looks_Bad.png">
+            </div>
+            <p>Yeah that looks bad. Let me zoom in for you.</p>
+            <div class="image_container">
+              <img src="images/Looks_Bad_Zoom.png">
+            </div>
+            <p>That's more what i would expect. Let's look at why this is happening. Do we really need to add some strange offset?</p>
+            <p>Let's make the screen (127, 25) just so i can fit it on this page and add some axis. The problem should still be there:</p>
+            <div class="image_container">
+              <img src="images/Smaller_Size_Problem_With_Axis.png">
+            </div>
+            <p>Let me zoom in again so we can see the situation better:</p>
+            <div class="image_container">
+              <img src="images/Smaller_Size_Problem_With_Axis_Zoom.png">
+            </div>
+            <p>
+            So here is where we run into problems. We have an odd screen size and we put the center (0.0, 0.0) in the middle of the screen.
+            We now have 63.5 pixels to the left of our screen and 63.5 pixels to the right. The start of the triangle we are rendering is
+            actually in the middle of a pixel. OpenGL can't fill half a pixel so it decided to take the first pixel and leave the last pixel out.
+            In the next picture i'll try to show how OpenGL trys to map one quad to the quad on the texture. The white outline is the quad we are
+            trying to draw. Remember it's aligned at a half pixel so (0,0) is actually in the middle of a pixel. But in our texture (0,0) is the
+            corner of a pixel. When you sample at the border of a pixel in a texture the results are not very 'reliable'. By that i mean it's hard
+            to figure out which pixel will be selected.
+            </p>
+            <figure class="image_container">
+              <img src="images/Smaller_Size_Problem_With_Axis_Zoom_Mapped.png">
+              <figcaption><span>Left: Result on screen.</span><span>Right: Texture</span></figcaption>
+            </figure>
+            <p>
+              Because we start our quad on a half pixel we run into some problems. So let's fix that
+            </p>
+            <pre>
+              let sprite = {
+                let mut s = Sprite::<f32>::new(texture.size());
+                s.size = Size::new(16.0, 12.0);
+                s.texture_offset= Position::new(0.0, 0.0);
+                <strong>s.position = Position::new(0.5, 0.5);</strong>
+                s
+              };
+            </pre>
+            <figure class="image_container">
+              <img src="images/Fixed_Quad_Moved.png">
+              <figcaption>Fixed by moving the quad</figcaption>
+            </figure>
+            <p>
+              We fixed it. Everything is right or is it? Let's just for fun make the screen size (256.0, 256.0).
+            </p>
+            <figure class="image_container">
+              <img src="images/Fixed_Quad_Moved_Fail.png">
+              <figcaption>Not fixed?</figcaption>
+            </figure>
+            <p>
+              I hope by now this does not surprise you. We moved the quad by half a pixel and with an even viewport the quad starts on the center
+              of a pixel again.
+            </p>
+            <h2>The solution</h2>
+          <p>
+            So the offset we removed in the begining might not have been a bad idea after all?
+            There are a lot of ways to solve this problem.
+            Let's compare the solutions a little bit. All of them have some trade offs. And you might choose a different solution.
+            <ol>
+              <li><strong>Add an offset to the uv coordinates.</strong>
+                <ul>
+                  <li>Advantage: We can render at any float position.</li>
+                  <li>Disadvantage: I don't even understand which pixels OpenGL will choose.</li>
+                </ul>
+                I really dislike this solution. I want to align the quad to actual screen pixels a half pixel where i'm unsure which pixel gets rendered.
+              </li>
+              <li><strong>Add an offset to the sprite.</strong>
+                <ul>
+                  <li>Advantage: The rendered quad actually aligns with screen pixels.</li>
+                  <li>Disadvantage: We have to make a separate case for odd and even viewport sizes.</li>
+                </ul>
+                This is the solution i will implement. The main reasons are:
+                <ul>
+                  <li>I really want the quads to align with actual pixels.</li>
+                  <li>Solution 3 might be better but it's more invasive in the code base.</li>
+                  <li>The original program is written in rust and I literally downloaded rust 5 mins ago and never used. So i want the changes to be minimal.</li>
+                </ul>
+              </li>
+              <li><strong>Don't use (0, 0) as the center of our screen. Instead use one of the corners</strong>
+                <ul>
+                  <li>Advantage: We never divide by two to get half the screen. (0, 0) is one corner and (1,1) is the other.</li>
+                  <li>Disadvantage: Probably a lot of code has to change and it can be unintuitive to render at (0,0) and it's not the middle.</li>
+                </ul>
+                This might be the 'best' solution because it doesn't have the disadvantage of having to make two cases for even and odd viewports, but
+                it probably requires the most code changes.
+              </li>
+            </ol>
+          </p>
+          <p>
+            <pre>
+              let mut sprite = {
+                  let mut s = Sprite::<f32>::new(texture.size());
+                  s.size = Size::new(16.0, 12.0);
+                  s.position = Position::new((viewport.size().width%2) as f32 *0.5/renderer.pixel_size, (viewport.size().height%2) as f32 *0.5/renderer.pixel_size);
+                  s
+                };
+            </pre>
+            So here we just add 0.5 if the viewport width is odd and we also account for the 'pixel_size'. Pixel size just scales the size of the quad in this renderer.
+            So if the pixel size is 2 and we add 0.5 it will get multiplied by two. So instead we add 0.5/pixel_size which when multiplied by pixel_size will stay at 0.5.
+            We also need to do some work to fix the position when the user resizes the window:
+            <pre>
+              Event::Resize(_new_size) => {
+                viewport.resize(_new_size.cast());
+                sprite.position.x = sprite.position.x.floor();
+                if (_new_size.width % 2 == 1) {
+                  sprite.position.x = sprite.position.x + 0.5/renderer.pixel_size;
+                }
+              }
+            </pre>
+            So we do the exact same thing here. We floor the sprite position if it was already offset by 0.5 and add 0.5/pixel_size if the viewport size is odd.
+          </p>
+            <figure class="image_container">
+              <img src="images/Happy_Times.png">
+              <figcaption>And it finally works just fine</figcaption>
+            </figure>
+            <h2>Some final words and all the links</h2>
+          <p>
+            It's really not a complicated problem, that gets complicated by a lot of half truth you can find on Stackoverflow or the internet in general.
+            The problem is that the solution can be very specific to your rendering library. And this solution will not work for everyone.
+          </p>
+          <p>
+            This wonderful problem comes from a great programer and twitch streamer named <strong>togglebit</strong>. You can find him on <a href="https://twitch.tv/togglebit">https://twitch.tv/togglebit</a>.
+            The source code is in his public github repository at <a href="https://github.com/togglebyte">https://github.com/togglebyte</a>. The program is called 'mixel' and the library 'nightmaregl'.
+            My fork with the fix can be found at <a href="https://github.com/krumholt/mixel">https://github.com/krumholt/mixel</a> and <a href="https://github.com/krumholt/nightmaregl">https://github.com/krumholt/nightmaregl</a>.
+          </p>
+        </p>
+
+      </div>
+        <div>
+          <p>..</p>
+        </div>
+  </div>
+</body>
+</html>
